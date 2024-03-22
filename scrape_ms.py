@@ -210,7 +210,9 @@ class ScrapeMS:
         page_to_results_map: dict[str, tuple[int, int]],
     ):
         inputs = [(url, page) for url, (page, total) in page_to_results_map.items()]
-        results = process_map(cls._process_page_from_tuple, inputs, max_workers=max_workers)
+        results = process_map(
+            cls._process_page_from_tuple, inputs, max_workers=max_workers
+        )
         breakpoint()
 
 
