@@ -12,17 +12,30 @@ import typing as tp
 import logging
 from functools import partial
 from multiprocessing import Pool
-from tqdm.contrib.concurrent import process_map  # or thread_map
-from bs4 import BeautifulSoup
+from tqdm.contrib.concurrent import process_map
+import pandas as pd
+import datetime as dt
 
 logging.basicConfig(level=logging.INFO)
 
 
+class ListingInfo(tp.NamedTuple):
+    url: str
+    overview: str
+    qualifications: str
+    responsibilities: str
+
+
 class ScrapeMS:
+
+    _CACHE_FP = ""
+    _HEADLESS = True
+    _CHROMEDRIVER_PATH = Path("chromedriver")
+    _FP_TEMPLATE = "{date_str}_{padded_int}.json"
     _WAIT_DEFAULT = 5
     _TOTAL_RESULTS_PREFIX = "Showing 1-20 of"
     _PAGE_SUBQUERY_TEMPLATE = "&pg={page_num}&"
-    _JOB_BOX_TEMPLATE = "div[role='listitem'][class='ms-List-cell'][data-list-index='{job_num}'][data-automationid='ListCell']"
+    _JOB_BOX_TEMPLATE = "div[role='listitem'][class='ms-List-cell'][data-list-index='{listing_num}'][data-automationid='ListCell']"
     _LISTING_FIELDS = (
         "Date posted",
         "Job number",
@@ -37,35 +50,47 @@ class ScrapeMS:
     def __init__(
         self,
         base_url: str,
-        chromedriver_path: Path,
-        page_load_wait: int = _WAIT_DEFAULT,
         headless: bool = True,
         max_workers: int | None = None,
     ):
-        # Webdrivers are not thread-safe, so store a pre-configured factory for use in multiprocessing.
-        self._driver_factory: tp.Callable = self._build_driver_factory(
-            chromedriver_path=chromedriver_path, headless=headless
-        )
-
         self._base_url = base_url
         self._max_workers = max_workers
 
+    def to_disk(self) -> Path:
+        pass
+
     @classmethod
-    def _build_driver(
-        cls, chromedriver_path: Path, headless: bool
-    ) -> WebDriver:
+    def from_disk(cls, fp: Path):
+        pass
+
+    @classmethod
+    def from_disk_latest(cls, fp: Path):
+        pass
+
+    @classmethod
+    def from_url(
+        cls,
+        base_url: str,
+        cache_on_disk: bool = True,
+        max_workers: int | None = None,
+    ):
+        ptr_map = cls._build_page_to_results_map(base_url=base_url)
+        total_results = sum([res for _, (_, res) in ptr_map.items()])
+        logging.info(
+            f"Located {total_results} total listing(s) over {len(ptr_map)} pages."
+        )
+        cls._process_all_pages(
+            base_url=base_url, max_workers=max_workers, page_to_results_map=ptr_map
+        )
+
+    @classmethod
+    def _build_driver(cls) -> WebDriver:
         chrome_options = webdriver.ChromeOptions()
         chrome_options.add_argument("--window-size=1600,1000")
-        if headless:
+        if cls._HEADLESS:
             chrome_options.add_argument("--headless")
-
-        service = service = Service(chromedriver_path)
-
+        service = service = Service(str(cls._CHROMEDRIVER_PATH))
         return webdriver.Chrome(service=service, options=chrome_options)
-
-    @classmethod
-    def _build_driver_factory(cls, chromedriver_path: Path, headless: bool) -> tp.Callable:
-        return partial(cls._build_driver, chromedriver_path=chromedriver_path, headless=headless)
 
     @classmethod
     def _get_url(cls, url: str, driver: WebDriver) -> None:
@@ -75,140 +100,122 @@ class ScrapeMS:
         driver.get(url)
         time.sleep(cls._WAIT_DEFAULT)
 
-    def _build_page_to_results_map(self) -> dict[int, int]:
+    @classmethod
+    def _build_page_to_results_map(cls, base_url: str) -> dict[str, tuple[int, int]]:
         """
         Determine number of pages and job listings per page.
         """
-        driver = self._driver_factory()
-        self._get_url(self._base_url, driver=driver)
+        driver = cls._build_driver()
+        cls._get_url(base_url, driver=driver)
+
         h1_element = driver.find_element(
-            By.XPATH, f"//h1[contains(., '{self._TOTAL_RESULTS_PREFIX}')]"
+            By.XPATH, f"//h1[contains(., '{cls._TOTAL_RESULTS_PREFIX}')]"
         )
         _, page_size, total_results = map(int, re.findall(r"\d+", h1_element.text))
 
         total_pages = math.ceil(total_results / page_size)
         last_page_total = total_results % page_size
 
-        page_to_results_map = {page: page_size for page in range(1, total_pages)}
-        page_to_results_map[total_pages] = last_page_total
+        page_to_results_map = {
+            cls._build_page_url(base_url=base_url, page_num=page): (page, page_size)
+            for page in range(1, total_pages)
+        }
+        page_to_results_map[
+            cls._build_page_url(base_url=base_url, page_num=last_page_total)
+        ] = (last_page_total, total_pages + 1)
 
-        logging.info(
-            f"Located {total_results} total listing(s) over {total_pages} pages."
-        )
         return page_to_results_map
 
-    def _get_listing_html(
-        self,
-        job_num: int,
-        page_url: str,
-    ) -> tuple[str, dict[str, str]]:
-        driver = self._driver_factory()
-        self._get_url(url=page_url, driver=driver)
+    @classmethod
+    def _select_listing(cls, driver: WebDriver, listing_num: int) -> None:
         [div_element] = driver.find_elements(
-            By.CSS_SELECTOR, self._JOB_BOX_TEMPLATE.format(job_num=job_num)
+            By.CSS_SELECTOR, cls._JOB_BOX_TEMPLATE.format(listing_num=listing_num)
         )
         [button] = div_element.find_elements(By.TAG_NAME, "button")
         button.click()
-        time.sleep(2)
+        time.sleep(cls._WAIT_DEFAULT)
 
-        lfs = {}
-        for lf in self._LISTING_FIELDS:
-            print(lf)
-            breakpoint()
-            try:
-                heading = driver.find_element(By.XPATH, f"//div[text()='{lf}']")
-            except:
-                breakpoint()
-            value = heading.find_element(By.XPATH, "following-sibling::*[1]")
-            lfs[lf] = value.text
-        breakpoint()
+    @classmethod
+    def _retrieve_listing_info(
+        cls,
+        driver: WebDriver,
+    ) -> ListingInfo:
 
-        first_horizontal_line, *_ = driver.find_elements(By.CSS_SELECTOR, "hr[class^='horizontalLine-']")
-        next_div, *_ = first_horizontal_line.find_elements(By.XPATH, "following-sibling::div")
-        overview, qualifications, responsibilities, *_ = next_div.find_elements(By.XPATH, "./div")
-
-        breakpoint()
-
-    def _get_listing_text_highlight(
-        self,
-        job_num: int,
-        page_url: str,
-    ) -> tuple[str, str]:
-        """
-        Get the text of the given `job_num` on the given `page_url`.
-        """
-        time.sleep(job_num)
-        url = ""
-        logging.debug(f"failed to retrive url from {job_num=} {page_url=}")
-        driver = self._driver_factory()
-        try:
-            self._get_url(url=page_url, driver=driver)
-            # select listing
-            [div_element] = driver.find_elements(
-                By.CSS_SELECTOR, self._JOB_BOX_TEMPLATE.format(job_num=job_num)
-            )
-            [button] = div_element.find_elements(By.TAG_NAME, "button")
-            button.click()
-            url = driver.current_url
-
-            # highlight and copy everything in it
-            elements = driver.find_elements(By.XPATH, "//*")
-            text_content = ""
-
-            for element in elements:
-                try:
-                    driver.execute_script("arguments[0].style.backgroundColor = 'yellow';", element)
-                    element_text = element.text
-
-                    text_content += element_text
-                except Exception as _:
-                    # breakpoint()
-                    pass
-        except Exception as e:
-            driver.quit()
-            return url, str(e)
-
-        return driver.current_url, text_content
-
-
-    def _get_results_on_page(
-        self, page_url: str, expected_total_jobs: int
-    ) -> dict[str, str]:
-        """
-        Get all job listing urls from a given page url.
-        """
-        get_listing_text = partial(
-            self._get_listing_text_highlight,
-            page_url=page_url,
+        first_horizontal_line, *_ = driver.find_elements(
+            By.CSS_SELECTOR, "hr[class^='horizontalLine-']"
         )
-        self._get_listing_html(job_num=1, page_url=page_url)
-        results = process_map(
-            get_listing_text,
-            range(1, expected_total_jobs + 1),
-            max_workers=self._max_workers,
+        next_div, *_ = first_horizontal_line.find_elements(
+            By.XPATH, "following-sibling::div"
         )
+        overview, qualifications, responsibilities, *_ = next_div.find_elements(
+            By.XPATH, "./div"
+        )
+
+        li = ListingInfo(
+            url=driver.current_url,
+            overview=overview.text,
+            qualifications=qualifications.text,
+            responsibilities=responsibilities.text,
+        )
+
+        return li
+
+    @classmethod
+    def _process_page(
+        cls, page_url: str, listings_on_page: int
+    ) -> tp.List[ListingInfo]:
+        driver = cls._build_driver()
+        cls._get_url(page_url, driver=driver)
+
+        results = []
+        for listing_num in range(1, listings_on_page + 1):
+            cls._select_listing(driver=driver, listing_num=listing_num)
+            li = cls._retrieve_listing_info(driver=driver)
+            results.append(li)
+
         return results
 
+    # TODO figure out how to get rid of this
+    @classmethod
+    def _process_page_from_tuple(
+        cls, url_listings: tuple[str, int]
+    ) -> tp.List[ListingInfo]:
+        page_url, listings_on_page = url_listings
+        driver = cls._build_driver()
+        cls._get_url(page_url, driver=driver)
 
-    def run(self):
-        for page_num, expected_total_jobs in self._build_page_to_results_map().items():
-            logging.info(f"Scraping page {page_num}.")
-            page_url = self._base_url.replace(
-                self._PAGE_SUBQUERY_TEMPLATE.format(page_num=1),
-                self._PAGE_SUBQUERY_TEMPLATE.format(page_num=page_num),
-            )
-            for sub_results in self._get_results_on_page(
-                page_url=page_url, expected_total_jobs=expected_total_jobs
-            ):
-                yield sub_results
+        results = []
+        for listing_num in range(1, listings_on_page + 1):
+            cls._select_listing(driver=driver, listing_num=listing_num)
+            try:
+                li = cls._retrieve_listing_info(driver=driver)
+            except Exception as e:
+                li = (listing_num, str(e))
+            results.append(li)
+        return results
+
+    @classmethod
+    def _build_page_url(cls, base_url: str, page_num: int) -> str:
+        page_url = base_url.replace(
+            cls._PAGE_SUBQUERY_TEMPLATE.format(page_num=1),
+            cls._PAGE_SUBQUERY_TEMPLATE.format(page_num=page_num),
+        )
+        return page_url
+
+    @classmethod
+    def _process_all_pages(
+        cls,
+        base_url: str,
+        max_workers: int | None,
+        page_to_results_map: dict[str, tuple[int, int]],
+    ):
+        inputs = [(url, page) for url, (page, total) in page_to_results_map.items()]
+        results = process_map(cls._process_page_from_tuple, inputs, max_workers=max_workers)
+        breakpoint()
 
 
 if __name__ == "__main__":
-    s = ScrapeMS(
-        base_url="https://jobs.careers.microsoft.com/global/en/search?q=Software%20Engineer%20-principal%20-senior%20python%20-atlanta&lc=United%20States&p=Software%20Engineering&exp=Experienced%20professionals&rt=Individual%20Contributor&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Relevance&flt=true",
-        chromedriver_path=Path("chromedriver"),
-        # max_workers=1,
-        headless=False,
+    s = ScrapeMS.from_url(
+        base_url="https://jobs.careers.microsoft.com/global/en/search?q=Software%20Engineer%20-principal%20-senior%20python%20-atlanta&lc=United%20States&p=Software%20Engineering&exp=Experienced%20professionals&rt=Individual%20Contributor&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Relevance&flt=true"
     )
-    results = list(s.run())
     breakpoint()
