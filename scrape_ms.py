@@ -187,6 +187,7 @@ class ScrapeMS:
         results = []
         for listing_num in range(1, listings_on_page + 1):
             cls._select_listing(driver=driver, listing_num=listing_num)
+            print(listing_num)
             try:
                 li = cls._retrieve_listing_info(driver=driver)
             except Exception as e:
