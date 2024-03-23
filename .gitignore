@@ -2,3 +2,4 @@ chromedriver
 .jobs
 .zed
 .ruff_cache
+resources/
