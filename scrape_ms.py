@@ -256,5 +256,5 @@ if __name__ == "__main__":
     # s = ScrapeMS.from_url(
     #     base_url="https://jobs.careers.microsoft.com/global/en/search?q=Software%20Engineer%20-principal%20-senior%20python%20-atlanta&lc=United%20States&p=Software%20Engineering&exp=Experienced%20professionals&rt=Individual%20Contributor&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Relevance&flt=true"
     # )
-    s = ScrapeMS.from_disk(Path("listings-microsoft_2024-03-21_0001.json"))
+    s = ScrapeMS.from_disk(Path("resources") / "listings-microsoft_2024-03-21_0001.json")
     breakpoint()

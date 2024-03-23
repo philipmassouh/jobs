@@ -3,3 +3,4 @@ tqdm
 isort
 pyright
 ruff
+pandas
