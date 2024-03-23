@@ -15,12 +15,15 @@ from multiprocessing import Pool
 from tqdm.contrib.concurrent import process_map
 import pandas as pd
 import datetime as dt
+import os
 
 logging.basicConfig(level=logging.INFO)
 
 
 class ListingInfo(tp.NamedTuple):
     url: str
+    error: bool
+    error_msg: str
     overview: str
     qualifications: str
     responsibilities: str
@@ -28,10 +31,9 @@ class ListingInfo(tp.NamedTuple):
 
 class ScrapeMS:
 
-    _CACHE_FP = ""
+    _JSON_ORIENTATION = "table"
     _HEADLESS = True
     _CHROMEDRIVER_PATH = Path("chromedriver")
-    _FP_TEMPLATE = "{date_str}_{padded_int}.json"
     _WAIT_DEFAULT = 5
     _TOTAL_RESULTS_PREFIX = "Showing 1-20 of"
     _PAGE_SUBQUERY_TEMPLATE = "&pg={page_num}&"
@@ -46,32 +48,52 @@ class ScrapeMS:
         "Discipline",
         "Employment type",
     )
+    _FP_ROOT = "listing-microsoft"
+    _FP_TEMPLATE = _FP_ROOT + "_{date_str}_{revision}.json"
 
     def __init__(
         self,
-        base_url: str,
-        headless: bool = True,
-        max_workers: int | None = None,
+        listing_data: pd.DataFrame,
     ):
-        self._base_url = base_url
-        self._max_workers = max_workers
+        self._listing_data = listing_data
 
-    def to_disk(self) -> Path:
-        pass
+    @classmethod
+    def _calculate_revision(cls, output_dir: Path, date: dt.date) -> int:
+        """
+        Increment revision to avoid overwrites.
+        """
+        all_files = os.listdir(output_dir)
+
+        matches = []
+        for fp in all_files:
+            if fp.startswith(cls._FP_ROOT):
+                _, date_str, revision_ext = fp.split("_")
+                revision, _ = revision_ext.split(".")
+                if dt.date.fromisoformat(date_str) == date:
+                    matches.append(revision)
+
+        return max(matches)
+
+
+    def to_disk(self, output_dir: Path) -> Path:
+        today = dt.date.today()
+        revision = self._calculate_revision(output_dir=output_dir, date=today)
+        fp = self._FP_TEMPLATE.format(date_str=today, revision=revision)
+
+        full_fp = output_dir / fp
+        self._listing_data.to_json(full_fp, orient=self._JSON_ORIENTATION)
+
+        return full_fp
 
     @classmethod
     def from_disk(cls, fp: Path):
-        pass
-
-    @classmethod
-    def from_disk_latest(cls, fp: Path):
-        pass
+        df = pd.read_json(fp, orient=cls._JSON_ORIENTATION)
+        return cls(listing_data=df)
 
     @classmethod
     def from_url(
         cls,
         base_url: str,
-        cache_on_disk: bool = True,
         max_workers: int | None = None,
     ):
         ptr_map = cls._build_page_to_results_map(base_url=base_url)
@@ -79,9 +101,10 @@ class ScrapeMS:
         logging.info(
             f"Located {total_results} total listing(s) over {len(ptr_map)} pages."
         )
-        cls._process_all_pages(
+        df = cls._process_all_pages(
             base_url=base_url, max_workers=max_workers, page_to_results_map=ptr_map
         )
+        cls(listing_data=df)
 
     @classmethod
     def _build_driver(cls) -> WebDriver:
@@ -153,6 +176,8 @@ class ScrapeMS:
 
         li = ListingInfo(
             url=driver.current_url,
+            error=False,
+            error_msg="",
             overview=overview.text,
             qualifications=qualifications.text,
             responsibilities=responsibilities.text,
@@ -178,20 +203,27 @@ class ScrapeMS:
     # TODO figure out how to get rid of this
     @classmethod
     def _process_page_from_tuple(
-        cls, url_listings: tuple[str, int]
+        cls, url_listings: tuple[str, int, int]
     ) -> tp.List[ListingInfo]:
-        page_url, listings_on_page = url_listings
+        page_url, page, total = url_listings
+
         driver = cls._build_driver()
         cls._get_url(page_url, driver=driver)
 
         results = []
-        for listing_num in range(1, listings_on_page + 1):
-            cls._select_listing(driver=driver, listing_num=listing_num)
-            print(listing_num)
+        for listing_num in range(1, total + 1):
             try:
+                cls._select_listing(driver=driver, listing_num=listing_num)
                 li = cls._retrieve_listing_info(driver=driver)
             except Exception as e:
-                li = (listing_num, str(e))
+                li = ListingInfo(
+                    url=driver.current_url,
+                    error=False,
+                    error_msg=str(e),
+                    overview="",
+                    qualifications="",
+                    responsibilities="",
+                )
             results.append(li)
         return results
 
@@ -209,16 +241,20 @@ class ScrapeMS:
         base_url: str,
         max_workers: int | None,
         page_to_results_map: dict[str, tuple[int, int]],
-    ):
-        inputs = [(url, page) for url, (page, total) in page_to_results_map.items()]
-        results = process_map(
+    ) -> pd.DataFrame:
+        inputs = [(url, page, total) for url, (page, total) in page_to_results_map.items()]
+        results_raw = process_map(
             cls._process_page_from_tuple, inputs, max_workers=max_workers
         )
-        breakpoint()
+        results = [r for res in results_raw for r in res]
+        df = pd.DataFrame(results._asdict() for results in results)
+
+        return df
 
 
 if __name__ == "__main__":
-    s = ScrapeMS.from_url(
-        base_url="https://jobs.careers.microsoft.com/global/en/search?q=Software%20Engineer%20-principal%20-senior%20python%20-atlanta&lc=United%20States&p=Software%20Engineering&exp=Experienced%20professionals&rt=Individual%20Contributor&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Relevance&flt=true"
-    )
+    # s = ScrapeMS.from_url(
+    #     base_url="https://jobs.careers.microsoft.com/global/en/search?q=Software%20Engineer%20-principal%20-senior%20python%20-atlanta&lc=United%20States&p=Software%20Engineering&exp=Experienced%20professionals&rt=Individual%20Contributor&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Relevance&flt=true"
+    # )
+    s = ScrapeMS.from_disk(Path("listings-microsoft_2024-03-21_0001.json"))
     breakpoint()
