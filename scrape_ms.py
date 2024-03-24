@@ -50,6 +50,7 @@ class ScrapeMS:
     )
     _FP_ROOT = "listing-microsoft"
     _FP_TEMPLATE = _FP_ROOT + "_{date_str}_{revision}.json"
+    _REMOVE_SYMBOLS_RE = ""
 
     def __init__(
         self,
@@ -251,10 +252,27 @@ class ScrapeMS:
 
         return df
 
+    @classmethod
+    def _tokenize(cls, input_text: str) -> tp.Set[str]:
+        text = input_text.lower()
+        text = text.replace("\u202f", " ")
+        text = re.sub(r'[^\w\s]', "", text)
+        text = text.replace("\n", " ")
+        words = set(text.split(" "))
+        return words
+
+
+    def _build_tags(self):
+        self._listing_data["overview_keywords"] = self._listing_data["overview"].apply(self._tokenize)
+        self._listing_data["qualifications_keywords"] = self._listing_data["qualifications"].apply(self._tokenize)
+        self._listing_data["responsibilities_keywords"] = self._listing_data["responsibilities"].apply(self._tokenize)
+        breakpoint()
+
 
 if __name__ == "__main__":
     # s = ScrapeMS.from_url(
     #     base_url="https://jobs.careers.microsoft.com/global/en/search?q=Software%20Engineer%20-principal%20-senior%20python%20-atlanta&lc=United%20States&p=Software%20Engineering&exp=Experienced%20professionals&rt=Individual%20Contributor&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Relevance&flt=true"
     # )
-    s = ScrapeMS.from_disk(Path("resources") / "listings-microsoft_2024-03-21_0001.json")
+    scms = ScrapeMS.from_disk(Path("resources") / "listings-microsoft_2024-03-21_0001.json")
+    scms._build_tags()
     breakpoint()
