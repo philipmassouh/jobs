@@ -16,6 +16,7 @@ from tqdm.contrib.concurrent import process_map
 import pandas as pd
 import datetime as dt
 import os
+import textwrap
 
 logging.basicConfig(level=logging.INFO)
 
@@ -75,7 +76,6 @@ class ScrapeMS:
 
         return max(matches)
 
-
     def to_disk(self, output_dir: Path) -> Path:
         today = dt.date.today()
         revision = self._calculate_revision(output_dir=output_dir, date=today)
@@ -105,7 +105,7 @@ class ScrapeMS:
         df = cls._process_all_pages(
             base_url=base_url, max_workers=max_workers, page_to_results_map=ptr_map
         )
-        cls(listing_data=df)
+        return cls(listing_data=df)
 
     @classmethod
     def _build_driver(cls) -> WebDriver:
@@ -175,6 +175,7 @@ class ScrapeMS:
             By.XPATH, "./div"
         )
 
+
         li = ListingInfo(
             url=driver.current_url,
             error=False,
@@ -243,7 +244,9 @@ class ScrapeMS:
         max_workers: int | None,
         page_to_results_map: dict[str, tuple[int, int]],
     ) -> pd.DataFrame:
-        inputs = [(url, page, total) for url, (page, total) in page_to_results_map.items()]
+        inputs = [
+            (url, page, total) for url, (page, total) in page_to_results_map.items()
+        ]
         results_raw = process_map(
             cls._process_page_from_tuple, inputs, max_workers=max_workers
         )
@@ -256,23 +259,49 @@ class ScrapeMS:
     def _tokenize(cls, input_text: str) -> tp.Set[str]:
         text = input_text.lower()
         text = text.replace("\u202f", " ")
-        text = re.sub(r'[^\w\s]', "", text)
+        text = re.sub(r"[^\w\s]", "", text)
         text = text.replace("\n", " ")
         words = set(text.split(" "))
         return words
 
+    def _build_tags(self) -> None:
+        stopwords = set(word.strip() for word in open("meaningless_words.txt", "r"))
+        stopwords.add("")
 
-    def _build_tags(self):
-        self._listing_data["overview_keywords"] = self._listing_data["overview"].apply(self._tokenize)
-        self._listing_data["qualifications_keywords"] = self._listing_data["qualifications"].apply(self._tokenize)
-        self._listing_data["responsibilities_keywords"] = self._listing_data["responsibilities"].apply(self._tokenize)
-        breakpoint()
+        for col in ("overview", "qualifications", "responsibilities"):
+            self._listing_data[f"{col}_keywords"] = self._listing_data[col].apply(
+                self._tokenize
+            ).apply(lambda s: s - stopwords)
+
+    def create_job_summary(self, job_id: int) -> str:
+        """
+        Summarize the job information starting with keywords and finishing with all the text
+        """
+        job = self._listing_data.loc[job_id]
+        summary = (
+            f"JOB {job_id}: {job['url']}\n\n"
+            f"TAGS:\n\n"
+            f"overview: {', '.join(job['overview_keywords'])}\n\n"
+            f"qualifications: {', '.join(job['qualifications_keywords'])}\n\n"
+            f"responsibilities: {', '.join(job['responsibilities_keywords'])}\n\n\n"
+            f"================================================================================\n\n"
+            f"TEXT:\n\n"
+            f"{job['overview']}\n\n"
+            f"{job['qualifications']}\n\n"
+            f"{job['responsibilities']}\n"
+        )
+
+        return summary
 
 
 if __name__ == "__main__":
-    # s = ScrapeMS.from_url(
-    #     base_url="https://jobs.careers.microsoft.com/global/en/search?q=Software%20Engineer%20-principal%20-senior%20python%20-atlanta&lc=United%20States&p=Software%20Engineering&exp=Experienced%20professionals&rt=Individual%20Contributor&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Relevance&flt=true"
+    # scms = ScrapeMS.from_url(
+    #     base_url="https://jobs.careers.microsoft.com/global/en/search?q=Software%20Engineer%20-principal%20-senior%20python&lc=United%20States&p=Software%20Engineering&exp=Experienced%20professionals&rt=Individual%20Contributor&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Relevance&flt=true",
+    #     max_workers=3,
     # )
-    scms = ScrapeMS.from_disk(Path("resources") / "listings-microsoft_2024-03-21_0001.json")
+
+    scms = ScrapeMS.from_disk(
+        Path("resources") / "listings-microsoft_2024-04-07_0001.json"
+    )
     scms._build_tags()
     breakpoint()
